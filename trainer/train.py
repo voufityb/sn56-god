@@ -51,6 +51,9 @@ def parse():
     p.add_argument("--retrain-max-frac", type=float, default=0.7, help="skip phase 2 if s* is beyond this fraction of phase-1 steps (still improving)")
     p.add_argument("--retrain-phase1-frac", type=float, default=0.55, help="fraction of post-baseline budget reserved for phase-1 selection")
     p.add_argument("--retrain-max-images", type=int, default=12, help="disable retrain-all above this dataset size")
+    p.add_argument("--retrain-on-plateau", type=int, default=0,
+                   help="phase 1 keeps the whole budget and hands over to phase 2 after this many evals without a holdout gain; "
+                        "0 keeps the fixed --retrain-phase1-frac split")
     p.add_argument("--band-power", type=float, default=0.0, help="loss weight sigma^-P per band (0 = evaluator-identical)")
     p.add_argument("--edge-band-count", type=int, default=0,
                    help="number of lowest and highest sigma bands to oversample; 0 disables")
@@ -112,6 +115,8 @@ def main():
         raise SystemExit("--edge-band-repeat must be at least 1")
     if cfg.delta_average < 1:
         raise SystemExit("--delta-average must be at least 1")
+    if cfg.retrain_on_plateau < 0:
+        raise SystemExit("--retrain-on-plateau must be nonnegative")
     if cfg.alpha is None:
         cfg.alpha = float(cfg.rank)
     if cfg.deadline_ts is None:

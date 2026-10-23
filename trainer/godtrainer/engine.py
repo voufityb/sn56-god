@@ -552,10 +552,12 @@ class Trainer:
             available = self.remaining() - cfg.save_reserve - soup_reserve
 
 
-            if cfg.retrain_all and n_members == 1:
+            single_retrain = cfg.retrain_all and n_members == 1
+            if single_retrain and not cfg.retrain_on_plateau:
                 available *= cfg.retrain_phase1_frac
             budget_end = time.time() + available / (n_members - mi)
-            res = self.train_member(guider, extra, mi, budget_end)
+            res = self.train_member(guider, extra, mi, budget_end,
+                                    plateau_evals=cfg.retrain_on_plateau if single_retrain else 0)
             if res is None:
                 break
             members.append(res)
@@ -577,6 +579,22 @@ class Trainer:
         json.dump(self.summary, open(os.path.join(self.out_dir, "summary.json"), "w"), indent=1)
         log("final:", json.dumps(self.summary["final"]))
 
+    def retrain_steps(self, s_star):
+        n_train = len(self.train_items)
+        n_all = n_train + len(self.holdout_items)
+        return int(math.ceil(s_star * n_all / n_train * self.cfg.retrain_scale))
+
+    def _plateau_handover(self, best_step, step, plateau_evals):
+        # Stop phase 1 early only when retrain_all will accept its best step and phase 2 fits in the time left;
+        # otherwise keep training, so a run that never plateaus spends its budget exactly like a plain run.
+        cfg = self.cfg
+        if best_step is None or step - best_step < plateau_evals * cfg.eval_every:
+            return False
+        if best_step > cfg.retrain_max_frac * self.summary["steps"]:
+            return False
+        need = self.retrain_steps(best_step) * (self.step_time or 3.0) * 1.1
+        return need < self.remaining() - cfg.save_reserve - 30
+
     def retrain_all(self, guider, extra, phase1):
 
 
@@ -587,8 +605,8 @@ class Trainer:
             log("retrain-all: phase 1 produced no usable best step; skipping")
             return
         select, s_star = m.group(1), int(m.group(2))
-        n_train, n_all = len(self.train_items), len(self.train_items) + len(self.holdout_items)
-        steps2 = int(math.ceil(s_star * n_all / n_train * cfg.retrain_scale))
+        n_all = len(self.train_items) + len(self.holdout_items)
+        steps2 = self.retrain_steps(s_star)
         est = steps2 * (self.step_time or 3.0)
         avail = self.remaining() - cfg.save_reserve - 30
         if est * 1.1 > avail:
@@ -609,7 +627,7 @@ class Trainer:
         self.save(self.best[2], self.best[3], score1, self.best[1])
         self.summary["retrain_all"] = {"skipped": False, "steps": steps2, "s_star": s_star, "select": select, "phase1_score": score1}
 
-    def train_member(self, guider, extra, mi, budget_end, fixed_steps=None, select=None):
+    def train_member(self, guider, extra, mi, budget_end, fixed_steps=None, select=None, plateau_evals=0):
 
 
         cfg = self.cfg
@@ -637,6 +655,7 @@ class Trainer:
         t0 = time.time()
         step, order, band_perm, cases, bi = 0, [], [], [], 0
         last_eval_step = 0
+        best_step, plateaued = None, False
         gen = torch.Generator(device="cpu").manual_seed(cfg.seed + 7919 * mi)
         while True:
             now = time.time()
@@ -742,8 +761,16 @@ class Trainer:
                 log(f"m{mi} step {step} loss {loss.item():.4f} band {band} lr {lr:.2e} step_t {self.step_time:.2f}s left {budget_end - time.time():.0f}s")
             if fixed_steps is None and (eval_due or step == cfg.eval_every):
                 last_eval_step = step
+                prev = best
                 best = self._select(guider, extra, lora, ema, best, step)
                 history.append(lora.state())
+                if best is not prev:
+                    best_step = step
+                if plateau_evals and self._plateau_handover(best_step, step, plateau_evals):
+                    plateaued = True
+                    self.summary["plateau"] = {"step": step, "best_step": best_step}
+                    log(f"m{mi} holdout flat since step {best_step}; handing over to retrain-all at step {step}")
+                    break
         if fixed_steps is not None:
             if select == "ema" and ema is not None:
                 state = {n: tuple(q.detach().clone() for q in tensors)
@@ -753,10 +780,12 @@ class Trainer:
             log(f"member {mi} (fixed) done: steps={step}/{fixed_steps} shipped {select}@{step} (blind)")
             return (float("nan"), f"{select}@{step}", state)
 
-        if step > last_eval_step and self.remaining() > cfg.save_reserve + (self.holdout_time or 60) * 2.1:
+        # After a plateau handover the states past best_step are on the overfitting side; skip scoring them so
+        # retrain_all receives a raw@/ema@ best it can reproduce.
+        if not plateaued and step > last_eval_step and self.remaining() > cfg.save_reserve + (self.holdout_time or 60) * 2.1:
             best = self._select(guider, extra, lora, ema, best, step)
             history.append(lora.state())
-        if (cfg.delta_average > 1 and len(history) >= cfg.delta_average
+        if (not plateaued and cfg.delta_average > 1 and len(history) >= cfg.delta_average
                 and time.time() + (self.holdout_time or 60) * 1.1 < budget_end):
             count = cfg.delta_average
             averaged = soup_tensors(history[-count:], self.device)

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trainer"))
+
 START = time.time()
 CACHE = "/cache"
 KILL_MARGIN_S = 180
@@ -67,10 +69,20 @@ def main():
     work = "/tmp/godtrainer-out"
     deadline = START + a.hours_to_complete * 3600 - KILL_MARGIN_S
     extra = ["--text-enc-dtype", "bf16"] if family == "qwen-image" else []
+    policy_args = []
+    try:
+        from godtrainer import policy
+
+        task = policy.profile(dataset, a.trigger_word)
+        policy_args = policy.extra_args(task)
+        if logs_enabled():
+            print(f"task profile {task} -> {policy_args}", flush=True)
+    except Exception as e:
+        print(f"task policy skipped ({type(e).__name__}: {e}); using the family recipe only", flush=True)
     cmd = [sys.executable, "/app/trainer/train.py", "--family", family, "--model-dir", model_dir, "--hf-cache", os.path.join(CACHE, "hf_cache"),
            "--baked-dir", "/opt/godtrainer/assets", "--comfy-root", os.environ.get("COMFY_ROOT", "/opt/ComfyUI"), "--dataset", dataset,
            "--out", work, "--deadline-ts", str(deadline)] + RECIPES[family] + COMMON + FAMILY_EXTRAS.get(family, [])\
-          + TASK_EXTRAS.get(a.task_id[:8], []) + extra
+          + TASK_EXTRAS.get(a.task_id[:8], []) + policy_args + extra
     if a.trigger_word:
         cmd += ["--trigger-word", a.trigger_word]
     if logs_enabled():
