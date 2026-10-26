@@ -34,6 +34,8 @@ def parse():
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--lora-plus-ratio", type=float, default=1.0, help="learning-rate multiplier for LoRA up matrices")
     p.add_argument("--ema", type=float, default=0.99)
+    p.add_argument("--power-ema", type=float, default=0.0,
+                   help="gamma of a power-function EMA scored in place of the raw weights (window ~ run length); 0 disables")
     p.add_argument("--include", default=None, help="regex on module names (relative to diffusion_model)")
     p.add_argument("--exclude", default=None)
     p.add_argument("--direct-include", default=None, help="regex for linear layers trained/exported as full direct deltas")
@@ -117,6 +119,8 @@ def main():
         raise SystemExit("--delta-average must be at least 1")
     if cfg.retrain_on_plateau < 0:
         raise SystemExit("--retrain-on-plateau must be nonnegative")
+    if cfg.power_ema < 0:
+        raise SystemExit("--power-ema must be nonnegative")
     if cfg.alpha is None:
         cfg.alpha = float(cfg.rank)
     if cfg.deadline_ts is None:

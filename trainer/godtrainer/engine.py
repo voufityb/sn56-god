@@ -600,7 +600,7 @@ class Trainer:
 
         cfg = self.cfg
         score1, tag1 = phase1[0], phase1[1]
-        m = re.match(r"(raw|ema)@(\d+)$", tag1)
+        m = re.match(r"(raw|ema|pema)@(\d+)$", tag1)
         if not m or score1 >= self.base_score:
             log("retrain-all: phase 1 produced no usable best step; skipping")
             return
@@ -650,6 +650,7 @@ class Trainer:
             weight_decay=cfg.weight_decay, eps=1e-8,
         )
         ema = [p.detach().clone() for p in lora.params] if cfg.ema > 0 else None
+        pema = [p.detach().clone() for p in lora.params] if cfg.power_ema > 0 else None
         best = (self.base_score, "base", lora.state())
         history = []
         t0 = time.time()
@@ -753,6 +754,13 @@ class Trainer:
                 with torch.no_grad():
                     for e, q in zip(ema, lora.params):
                         e.mul_(cfg.ema).add_(q.detach(), alpha=1 - cfg.ema)
+            if pema is not None:
+                # Power-function EMA (Karras et al. 2024): weights iterate t by t^gamma, so the averaging window is a
+                # fixed fraction of the member's run rather than a fixed number of steps, with no pull toward the init.
+                decay = (1 - 1 / (step + 1)) ** (cfg.power_ema + 1)
+                with torch.no_grad():
+                    for e, q in zip(pema, lora.params):
+                        e.mul_(decay).add_(q.detach(), alpha=1 - decay)
             dt = time.time() - ts
             self.step_time = dt if self.step_time is None else 0.9 * self.step_time + 0.1 * dt
             step += 1
@@ -762,7 +770,7 @@ class Trainer:
             if fixed_steps is None and (eval_due or step == cfg.eval_every):
                 last_eval_step = step
                 prev = best
-                best = self._select(guider, extra, lora, ema, best, step)
+                best = self._select(guider, extra, lora, ema, best, step, pema=pema)
                 history.append(lora.state())
                 if best is not prev:
                     best_step = step
@@ -772,9 +780,10 @@ class Trainer:
                     log(f"m{mi} holdout flat since step {best_step}; handing over to retrain-all at step {step}")
                     break
         if fixed_steps is not None:
-            if select == "ema" and ema is not None:
+            averaged = {"ema": ema, "pema": pema}.get(select)
+            if averaged is not None:
                 state = {n: tuple(q.detach().clone() for q in tensors)
-                         for n, tensors in lora.state_from_flat(ema).items()}
+                         for n, tensors in lora.state_from_flat(averaged).items()}
             else:
                 state = lora.state()
             log(f"member {mi} (fixed) done: steps={step}/{fixed_steps} shipped {select}@{step} (blind)")
@@ -783,7 +792,7 @@ class Trainer:
         # After a plateau handover the states past best_step are on the overfitting side; skip scoring them so
         # retrain_all receives a raw@/ema@ best it can reproduce.
         if not plateaued and step > last_eval_step and self.remaining() > cfg.save_reserve + (self.holdout_time or 60) * 2.1:
-            best = self._select(guider, extra, lora, ema, best, step)
+            best = self._select(guider, extra, lora, ema, best, step, pema=pema)
             history.append(lora.state())
         if (not plateaued and cfg.delta_average > 1 and len(history) >= cfg.delta_average
                 and time.time() + (self.holdout_time or 60) * 1.1 < budget_end):
@@ -800,8 +809,10 @@ class Trainer:
         log(f"member {mi} done: steps={step} best={best[1]} {best[0]:.6f} ({(best[0] / self.base_score - 1) * 100:+.2f}% vs base)")
         return best
 
-    def _select(self, guider, extra, lora, ema, best, step):
-        cands = [("raw", None, None)]
+    def _select(self, guider, extra, lora, ema, best, step, pema=None):
+        # The raw weights lost to their EMA at every eval of the A/B runs, so the wider power EMA takes their slot
+        # and the eval count per checkpoint stays the same.
+        cands = [("pema", lora.state_from_flat(pema), lora.scale)] if pema is not None else [("raw", None, None)]
         if ema is not None:
             ema_state = lora.state_from_flat(ema)
             cands.append(("ema", ema_state, lora.scale))

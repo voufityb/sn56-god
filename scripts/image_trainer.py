@@ -20,7 +20,7 @@ RECIPES = {
     "qwen-image": ["--rank", "8", "--lr", "1e-4", "--include", r"transformer_blocks\.\d+\.attn\.(to_q|to_k|to_v|to_out)"],
 }
 COMMON = ["--holdout-frac", "0.1", "--holdout-min", "3", "--holdout-noises", "1", "--eval-every", "300",
-          "--lr-final-frac", "0.1", "--ema", "0.99", "--case-cycle", "--balanced-prompts", "--delta-average", "2"]
+          "--lr-final-frac", "0.1", "--ema", "0.99", "--power-ema", "3", "--case-cycle", "--balanced-prompts", "--delta-average", "2"]
 FAMILY_EXTRAS = {
     "flux": ["--holdout-noises", "2"],
     "krea2": ["--select-metric", "mean", "--eval-every", "200", "--edge-band-count", "2", "--edge-band-repeat", "3"],
