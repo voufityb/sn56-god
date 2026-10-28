@@ -741,11 +741,31 @@ class Trainer:
             else:
                 prompts = ["" if self.rng.random() < cfg.empty_prompt_frac else item["caption"]]
             losses = []
-            for prompt in prompts:
-                with torch.enable_grad():
-                    mode_loss = self.loss(guider, extra, item, prompt, sigma, noise)
-                    (mode_loss * (self.band_weight(band) / len(prompts))).backward()
-                losses.append(mode_loss.detach())
+            oom = False
+            try:
+                for prompt in prompts:
+                    with torch.enable_grad():
+                        mode_loss = self.loss(guider, extra, item, prompt, sigma, noise)
+                        (mode_loss * (self.band_weight(band) / len(prompts))).backward()
+                    losses.append(mode_loss.detach())
+            except torch.cuda.OutOfMemoryError:
+                if cfg.ckpt and cfg.ckpt_stride == 1:
+                    raise
+                oom = True
+            if oom:
+                # A step without full gradient checkpointing ran out of memory (a no-ckpt recipe on a bigger model or
+                # on unusually long captions such as Ideogram UI-design JSON prompts): drop the step, checkpoint more
+                # blocks (every second one first, then all of them) and keep training.
+                mode_loss = losses = None
+                opt.zero_grad(set_to_none=True)
+                gc.collect()
+                torch.cuda.empty_cache()
+                stride = 1 if cfg.ckpt else 2
+                cfg.ckpt, cfg.ckpt_stride = True, stride
+                self.step_time = None
+                log_error(f"CUDA out of memory at m{mi} step {step}; checkpointing every {stride} block(s), newly wrapped:",
+                          enable_checkpointing(self.diff, stride=stride))
+                continue
             loss = torch.stack(losses).mean()
             torch.nn.utils.clip_grad_norm_(lora.params, cfg.grad_clip)
             opt.step()
@@ -772,6 +792,8 @@ class Trainer:
                 prev = best
                 best = self._select(guider, extra, lora, ema, best, step, pema=pema)
                 history.append(lora.state())
+                # Only the newest delta_average states are ever averaged; older GPU copies just add up per eval.
+                del history[:-max(1, cfg.delta_average)]
                 if best is not prev:
                     best_step = step
                 if plateau_evals and self._plateau_handover(best_step, step, plateau_evals):

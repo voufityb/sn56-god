@@ -17,14 +17,18 @@ RECIPES = {
     "ideogram4": ["--rank", "16", "--lr", "2e-4", "--include", r"layers\.\d+\.(attention|adaln_modulation|feed_forward)", "--empty-prompt-frac", "0.3"],
     "z-image": ["--rank", "16", "--lr", "3e-4"],
     "flux": ["--rank", "16", "--lr", "3e-4", "--no-ckpt", "--include", r"(double_blocks|single_blocks)\.\d+\.(img_attn|txt_attn|img_mlp|txt_mlp|linear1|linear2)"],
-    "qwen-image": ["--rank", "8", "--lr", "1e-4", "--include", r"transformer_blocks\.\d+\.attn\.(to_q|to_k|to_v|to_out)"],
+    "qwen-image": ["--rank", "16", "--lr", "2e-4", "--include", r"transformer_blocks\.\d+\.attn\.(to_q|to_k|to_v|to_out)"],
 }
 COMMON = ["--holdout-frac", "0.1", "--holdout-min", "3", "--holdout-noises", "1", "--eval-every", "300",
           "--lr-final-frac", "0.1", "--ema", "0.99", "--power-ema", "3", "--case-cycle", "--balanced-prompts", "--delta-average", "2"]
+# krea2 and qwen-image train without gradient checkpointing (the engine checkpoints every 2nd, then every block after an
+# out-of-memory step), evaluate the holdout less often so more of the budget trains, and learn faster with LoRA+.
 FAMILY_EXTRAS = {
     "flux": ["--holdout-noises", "2"],
-    "krea2": ["--select-metric", "mean", "--eval-every", "200", "--edge-band-count", "2", "--edge-band-repeat", "3"],
+    "krea2": ["--select-metric", "mean", "--eval-every", "400", "--edge-band-count", "2", "--edge-band-repeat", "3",
+              "--no-ckpt", "--lora-plus-ratio", "4"],
     "ideogram4": ["--no-ckpt", "--select-metric", "p75", "--eval-every", "200"],
+    "qwen-image": ["--no-ckpt", "--eval-every", "500", "--lora-plus-ratio", "2"],
 }
 TASK_EXTRAS = {
     "98f33b85": ["--select-metric", "p75", "--seed", "2", "--eval-every", "200"],
